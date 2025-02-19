@@ -3,22 +3,28 @@ package server
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
-	"nikandishan/structs"
+	concurrentlogger "nikandishan/concurrentLogger"
 	"nikandishan/structs/task"
+	"nikandishan/utils/customeError"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 func setupRoutes(r *gin.Engine) {
-	r.GET("/tasks", getTasks)
-	r.GET("/tasks/:id", getTask)
+	r.GET("/tasks", func(c *gin.Context) {
+		getTasks(c, task.GetTasks)
+	})
+	r.GET("/task/:id", getTask)
 
 	protected := r.Group("/")
 	protected.Use(AuthMiddleware())
 
-	protected.POST("/tasks", createTask)
+	protected.POST("/tasks", func(c *gin.Context) {
+		createTask(c, task.CreateTask)
+	})
 	protected.PUT("/tasks/:id", updateTask)
 	protected.DELETE("/tasks/:id", deleteTask)
 }
@@ -27,70 +33,86 @@ func getTask(c *gin.Context) {
 	id := c.Param("id")
 
 	task, err := task.GetTask(id)
-	if errors.Is(err, structs.ErrTaskNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+	if errors.Is(err, customeError.ErrTaskNotFound) {
+		RespondWithError(c, http.StatusNotFound, "Task not found", "TASK_404")
+		return
+	} else if err != nil {
+		RespondWithError(c, http.StatusInternalServerError, "Internal server error", "TASK_500")
 		return
 	}
 
 	c.JSON(http.StatusOK, task)
 }
 
-func getTasks(c *gin.Context) {
+func getTasks(c *gin.Context, getTasksFunc func(ctx context.Context, status string) ([]task.Task, error)) {
+	status := c.Query("status")
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	tasks, err := task.GetTasks(ctx)
+	tasks, err := getTasksFunc(ctx, status)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			c.JSON(http.StatusRequestTimeout, gin.H{"error": "Request timed out"})
+			RespondWithError(c, http.StatusRequestTimeout, "Request timed out", "TASK_408")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, "Internal server error", "TASK_500")
 		}
 		return
 	}
 
 	if len(tasks) == 0 {
-		c.JSON(http.StatusOK, gin.H{"status": "There is no Task"})
+		RespondWithError(c, http.StatusOK, "No tasks found", "TASK_204")
 		return
 	}
 
 	c.JSON(http.StatusOK, tasks)
 }
 
-func createTask(c *gin.Context) {
+func createTask(c *gin.Context, createTaskFunc func(task.Task) (error, task.Task)) {
 	var newTask task.Task
 	if err := c.ShouldBindJSON(&newTask); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		RespondWithError(c, http.StatusBadRequest, "Invalid request body", "TASK_400")
 		return
 	}
 
-	err := task.CreateTask(newTask)
-	if errors.Is(err, structs.ErrInvalidTaskFormat) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	err, createdTask := createTaskFunc(newTask)
+	if errors.Is(err, customeError.ErrInvalidTaskFormat) {
+		RespondWithError(c, http.StatusBadRequest, err.Error(), "TASK_400")
+		return
+	} else if err != nil {
+		RespondWithError(c, http.StatusInternalServerError, "Failed to create task", "TASK_500")
 		return
 	}
 
-	c.JSON(http.StatusCreated, newTask)
+	c.JSON(http.StatusCreated, createdTask)
 }
 
 func updateTask(c *gin.Context) {
 	id := c.Param("id")
 
-	var updatedTask task.Task
-	if err := c.ShouldBindJSON(&updatedTask); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	var inputTask task.Task
+	if err := c.ShouldBindJSON(&inputTask); err != nil {
+		RespondWithError(c, http.StatusBadRequest, "Invalid request body", "TASK_400")
 		return
 	}
 
-	err := task.UpdateTask(id, updatedTask)
-	if errors.Is(err, structs.ErrInvalidTaskFormat) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Task Format"})
+	err, updatedTask := task.UpdateTask(id, inputTask)
+	if errors.Is(err, customeError.ErrInvalidTaskFormat) {
+		RespondWithError(c, http.StatusBadRequest, "Invalid task format", "TASK_400")
 		return
-	} else if errors.Is(err, structs.ErrTaskNotFound) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Wrong Task ID"})
+	} else if errors.Is(err, customeError.ErrTaskNotFound) {
+		RespondWithError(c, http.StatusNotFound, "Task not found", "TASK_404")
+		return
+	} else if err != nil {
+		RespondWithError(c, http.StatusInternalServerError, "Failed to update task", "TASK_500")
 		return
 	}
 
+	select {
+	case concurrentlogger.UpdateTaskChan <- updatedTask:
+	default:
+		log.Println("Warning: Task update dropped due to full queue")
+	}
 	c.JSON(http.StatusOK, updatedTask)
 }
 
@@ -98,8 +120,11 @@ func deleteTask(c *gin.Context) {
 	id := c.Param("id")
 
 	err := task.DeleteTask(id)
-	if errors.Is(err, structs.ErrTaskNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+	if errors.Is(err, customeError.ErrTaskNotFound) {
+		RespondWithError(c, http.StatusNotFound, "Task not found", "TASK_404")
+		return
+	} else if err != nil {
+		RespondWithError(c, http.StatusInternalServerError, "Failed to delete task", "TASK_500")
 		return
 	}
 

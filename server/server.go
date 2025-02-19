@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	concurrentlogger "nikandishan/concurrentLogger"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-func gracefulShutdown(srv *http.Server) {
+func gracefulShutdown(srv *http.Server, wg *sync.WaitGroup) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
@@ -27,10 +29,15 @@ func gracefulShutdown(srv *http.Server) {
 		log.Fatalf("Error shutting down server: %v", err)
 	}
 
+	close(concurrentlogger.UpdateTaskChan)
+	wg.Wait()
 	fmt.Println("server gracefully stoped")
 }
 
-func StartServer() {
+func StartServer() *http.Server {
+	var wg sync.WaitGroup
+	concurrentlogger.StartLogger(&wg)
+
 	r := gin.Default()
 
 	r.Use(LoggingMiddleware())
@@ -49,5 +56,6 @@ func StartServer() {
 		}
 	}()
 
-	gracefulShutdown(srv)
+	gracefulShutdown(srv, &wg)
+	return srv
 }

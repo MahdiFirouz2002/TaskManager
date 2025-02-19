@@ -2,7 +2,7 @@ package task
 
 import (
 	"context"
-	"nikandishan/structs"
+	"nikandishan/utils/customeError"
 	"sync"
 	"time"
 
@@ -42,8 +42,9 @@ func AddTask(title, description, status string) Task {
 	return task
 }
 
-func GetTasks(ctx context.Context) ([]Task, error) {
-	resultChan := make(chan []Task, 1)
+func GetTasks(ctx context.Context, status string) ([]Task, error) {
+	resultChan := make(chan []Task, 100)
+	defer close(resultChan)
 
 	go func() {
 		mutex.RLock()
@@ -51,7 +52,9 @@ func GetTasks(ctx context.Context) ([]Task, error) {
 
 		var taskList []Task
 		for _, task := range tasks {
-			taskList = append(taskList, task)
+			if status == "" || task.Status == status {
+				taskList = append(taskList, task)
+			}
 		}
 
 		select {
@@ -74,48 +77,48 @@ func GetTask(id string) (Task, error) {
 
 	task, exists := tasks[id]
 	if !exists {
-		return Task{}, structs.ErrTaskNotFound
+		return Task{}, customeError.ErrTaskNotFound
 	}
 
 	return task, nil
 }
 
-func CreateTask(newTask Task) error {
+func CreateTask(newTask Task) (error, Task) {
 	newTask.ID = uuid.New().String()
 	newTask.CreatedAt = time.Now()
 
 	if err := v.Struct(newTask); err != nil {
-		return structs.ErrInvalidTaskFormat
+		return customeError.ErrInvalidTaskFormat, Task{}
 	}
 
 	mutex.Lock()
 	tasks[newTask.ID] = newTask
 	mutex.Unlock()
 
-	return nil
+	return nil, newTask
 }
 
-func UpdateTask(id string, updatedTask Task) error {
+func UpdateTask(id string, updatedTask Task) (error, Task) {
 	mutex.Lock()
 	task, exists := tasks[id]
 	mutex.Unlock()
 
 	if !exists {
-		return structs.ErrTaskNotFound
+		return customeError.ErrTaskNotFound, Task{}
 	}
 
 	updatedTask.ID = task.ID
 	updatedTask.CreatedAt = task.CreatedAt
 
 	if err := v.Struct(updatedTask); err != nil {
-		return structs.ErrInvalidTaskFormat
+		return customeError.ErrInvalidTaskFormat, Task{}
 	}
 
 	mutex.Lock()
 	tasks[id] = updatedTask
 	mutex.Unlock()
 
-	return nil
+	return nil, updatedTask
 }
 
 func DeleteTask(id string) error {
@@ -127,7 +130,7 @@ func DeleteTask(id string) error {
 	mutex.Unlock()
 
 	if !exists {
-		return structs.ErrTaskNotFound
+		return customeError.ErrTaskNotFound
 	}
 
 	return nil
