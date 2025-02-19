@@ -61,7 +61,7 @@ go run main.go
 #### Create Task
 - **Endpoint**: `POST /tasks`
 - **Description**: Creates a new task.
-- **Authentication**: Required (`X-API-Key` header).
+- **Authentication**: Required (`X-API-Key: 12345` header).
 - **Request Body**:
   ```json
   {
